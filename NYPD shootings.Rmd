@@ -1,0 +1,110 @@
+---
+title: "NYPD Shooting Incidents"
+author: "Antoine Diffloth"
+date: "2023-08-21"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(tidyverse)
+library(rvest)
+library(xml2)
+```
+
+# NYPD Shooting Incident Data Report
+
+## Introduction
+
+In this report we are going to download the NYPD shooting data set, perform some analysis, fit a linear regression model and present a few visualizations.
+
+## Shootings by Borough
+
+First off, we will download the data, aggregate the number of shootings by borough and visualize the results.
+
+```{r get_nypd_data}
+# Load NYPD shooting data and calculate counts by borough
+nypd <- read.csv('https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD')
+shootings_by_boro <- aggregate(nypd$BORO, by=list(nypd$BORO), FUN=length)
+colnames(shootings_by_boro) <- c('borough', 'shootings')
+ggplot(shootings_by_boro, aes(borough, shootings)) +
+  geom_bar(stat="identity")
+shootings_by_boro
+```
+The borough with the highest number of shootings is Brooklyn, while Staten Island seems to have the lowest number of shootings. This is interesting, but can be misleading as it doesn't take the population of the borough into consideration.
+
+Now let's pull in population data from the 2020 census, join it to the shooting data, and adjust the shooting visualization to show shooting rate instead of raw number of shootings.
+```{r rate_per_1000}
+# Join in the population of each borough from the 2020 census
+nyc_pop <- read.csv('https://data.cityofnewyork.us/api/views/xywu-7bv9/rows.csv?accessType=DOWNLOAD')
+nyc_pop <- nyc_pop[-1, c("Borough", "X2020")]
+colnames(nyc_pop) <- c('borough', 'pop_2020')
+nyc_pop$borough <- toupper(trimws(nyc_pop$borough))
+shootings_by_boro <- inner_join(shootings_by_boro, nyc_pop, by='borough')
+
+# Calculate the rate of shootings per 1000 people, by borough
+shootings_by_boro$shootings_per_1000 <- shootings_by_boro$shootings / shootings_by_boro$pop_2020 * 1000
+
+ggplot(shootings_by_boro, aes(borough, shootings_per_1000)) +
+  geom_bar(stat="identity")
+shootings_by_boro
+```
+Now we can see that the Bronx has the highest risk of shootings, while the risk in Staten Island is no worse than in Manhattan or Queens.
+
+---
+
+## Effects of temperature on shootings
+
+Many of studies have shown that the rate of violent crime increases as temperature rises. These studies have been replicated around the world from Chicago to Los Angeles to New Zealand. Two theories behind this is that: 1) warmer temperatures lead to more people having social interactions outdoors, which then leads to more interpersonal conflicts; and 2) hot temperatures make people more irritable and aggressive.
+
+Let's see if the NYPD shooting data follows this pattern. We downloaded average daily high and low temperatures for New York City, joined it to the shooting data, cleaned up some outliers related to reporting issues on national holidays, then fit the data to a linear model and plotted the results.
+
+```{r temperatures}
+# Read in average daily temps for NYC, source: https://www.extremeweatherwatch.com/
+nyc_temps_html <- read_html("https://www.extremeweatherwatch.com/cities/new-york/average-weather-by-day")
+html_tables <- nyc_temps_html %>%
+  html_nodes("table") %>%
+  html_table()
+nyc_temps <- as.data.frame(html_tables[1])[-1, ]
+colnames(nyc_temps) <- c("date", "high", "low")
+nyc_temps$high <- as.numeric(nyc_temps$high)
+nyc_temps$low <- as.numeric(nyc_temps$low)
+
+# Format the date column in the temperature df so we can join properly
+nyc_temps <- nyc_temps %>%
+  mutate(date = as.Date(paste0(date, ", 2020"), format="%B %d, %Y")) %>% # Add a year for conversion and convert to date
+  mutate(month_number = as.numeric(format(date, "%m")), # Extract the month number
+         day_number = as.numeric(format(date, "%d"))) %>% # Extract the day number (if needed)
+  mutate(date = paste0(month_number, "/", day_number)) # Convert back to the desired format
+nyc_temps$date <- format(as.Date(nyc_temps$date, format="%m/%d"), "%m/%d")
+
+# Format the date column on the original shooting df to match
+nypd$date <- format(as.Date(nypd$OCCUR_DATE, format="%m/%d/%Y"), "%m/%d")
+
+# Count of shootings by date
+shootings_by_date <- aggregate(nypd$date, by=list(nypd$date), FUN=length)
+colnames(shootings_by_date) <- c('date', 'shootings')
+
+# Remove some outliers
+shootings_by_date <- shootings_by_date[-c(1, 186, 187),]
+
+# Join shootings by date to temperatures by date
+shootings_and_temp <- inner_join(nyc_temps, shootings_by_date, by = "date")
+
+# Plot daily high temperatures vs number of shootings and fit a linear model
+ggplot(shootings_and_temp, aes(x = high, y = shootings)) +
+  geom_point() +
+  stat_smooth(method = "lm")
+linearModel = lm(shootings ~ high, shootings_and_temp)
+summary(linearModel)
+```
+The plot of shootings vs daily high temperature shows a clear positive relationship and the linear model fits the data pretty well. An R-squared value of 0.60 is quite impressive for a single-feature model with no feature engineering, especially when trying to predict human behavior.
+
+---
+
+## Possible Sources of Bias
+
+The data engineering and analysis in this report was fairly light, so there was limited risk of introducing my own bias. The original data may have had some bias introduced, but not knowing the details, I can only speculate. The transcription of some of the features in the data set, such as race, may have been influenced by beliefs, moods and prejudices held by the medical or law enforcement personnel that reported the incidents.
+
+The theories about why higher temperatures lead to higher rates of violent crime are definitely subject to bias. Most of these theories are based on our speculation on how humans interact with each other. We assume things about who commits crime, where crime is committed, how individuals interact in social settings and how temperature affects those variables. Those assumptions are subject to many of the biases we carry around.
